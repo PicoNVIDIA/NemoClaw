@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, it, expect } from "vitest";
-import { execSync, spawnSync } from "node:child_process";
+import { execSync, spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -328,7 +328,7 @@ describe("CLI dispatch", () => {
     expect(r.out).toContain("Collecting diagnostics for sandbox 'mybox'");
   });
 
-  it("routes logs to sandbox exec tailing the gateway log", () => {
+  it("routes logs to OpenClaw and OpenShell log sources", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "nemoclaw-cli-logs-follow-"));
     const localBin = path.join(home, "bin");
     const registryDir = path.join(home, ".nemoclaw");
@@ -356,7 +356,7 @@ describe("CLI dispatch", () => {
       [
         "#!/usr/bin/env bash",
         `marker_file=${JSON.stringify(markerFile)}`,
-        'printf \'%s \' "$@" > "$marker_file"',
+        'printf \'%s\\n\' "$*" >> "$marker_file"',
         "exit 0",
       ].join("\n"),
       { mode: 0o755 },
@@ -367,22 +367,64 @@ describe("CLI dispatch", () => {
       PATH: `${localBin}:${process.env.PATH || ""}`,
     });
 
+    const calls = fs.readFileSync(markerFile, "utf8").trim().split(/\n/);
     expect(r.code).toBe(0);
-    expect(readRecordedArgs(markerFile)).toEqual([
-      "sandbox",
-      "exec",
-      "-n",
-      "alpha",
-      "--",
-      "tail",
-      "-n",
-      "200",
-      "/tmp/gateway.log",
+    expect(calls).toEqual([
+      "settings set alpha --key ocsf_json_enabled --value true",
+      "sandbox exec -n alpha -- tail -n 200 /tmp/gateway.log",
+      "logs alpha -n 200 --source all",
     ]);
-    expect(readRecordedArgs(markerFile)).not.toContain("-f");
   });
 
-  it("passes --follow through to tail inside sandbox exec", () => {
+  it("enables OpenShell audit events before reading logs", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "nemoclaw-cli-logs-audit-"));
+    const localBin = path.join(home, "bin");
+    const registryDir = path.join(home, ".nemoclaw");
+    const markerFile = path.join(home, "logs-audit-calls");
+    fs.mkdirSync(localBin, { recursive: true });
+    fs.mkdirSync(registryDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(registryDir, "sandboxes.json"),
+      JSON.stringify({
+        sandboxes: {
+          alpha: {
+            name: "alpha",
+            model: "test-model",
+            provider: "nvidia-prod",
+            gpuEnabled: false,
+            policies: [],
+          },
+        },
+        defaultSandbox: "alpha",
+      }),
+      { mode: 0o600 },
+    );
+    fs.writeFileSync(
+      path.join(localBin, "openshell"),
+      [
+        "#!/usr/bin/env bash",
+        `marker_file=${JSON.stringify(markerFile)}`,
+        'printf \'%s\\n\' "$*" >> "$marker_file"',
+        "exit 0",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const r = runWithEnv("alpha logs", {
+      HOME: home,
+      PATH: `${localBin}:${process.env.PATH || ""}`,
+    });
+
+    const calls = fs.readFileSync(markerFile, "utf8").trim().split(/\n/);
+    expect(r.code).toBe(0);
+    expect(calls).toEqual([
+      "settings set alpha --key ocsf_json_enabled --value true",
+      "sandbox exec -n alpha -- tail -n 200 /tmp/gateway.log",
+      "logs alpha -n 200 --source all",
+    ]);
+  });
+
+  it("maps --follow to OpenShell live log streaming", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "nemoclaw-cli-logs-follow-"));
     const localBin = path.join(home, "bin");
     const registryDir = path.join(home, ".nemoclaw");
@@ -414,7 +456,7 @@ describe("CLI dispatch", () => {
         "  echo 'openshell 0.0.16'",
         "  exit 0",
         "fi",
-        'printf \'%s \' "$@" > "$marker_file"',
+        'printf \'%s\\n\' "$*" >> "$marker_file"',
         "exit 0",
       ].join("\n"),
       { mode: 0o755 },
@@ -425,19 +467,89 @@ describe("CLI dispatch", () => {
       PATH: `${localBin}:${process.env.PATH || ""}`,
     });
 
+    const calls = fs.readFileSync(markerFile, "utf8").trim().split(/\n/);
     expect(r.code).toBe(0);
-    expect(readRecordedArgs(markerFile)).toEqual([
-      "sandbox",
-      "exec",
-      "-n",
-      "alpha",
-      "--",
-      "tail",
-      "-n",
-      "200",
-      "-f",
-      "/tmp/gateway.log",
-    ]);
+    expect(calls).toContain("settings set alpha --key ocsf_json_enabled --value true");
+    expect(calls).toContain("sandbox exec -n alpha -- tail -n 200 -f /tmp/gateway.log");
+    expect(calls).toContain("logs alpha -n 200 --source all --tail");
+  });
+
+  it("keeps logs --follow running when one log source exits", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "nemoclaw-cli-logs-follow-source-exit-"));
+    const localBin = path.join(home, "bin");
+    const registryDir = path.join(home, ".nemoclaw");
+    const markerFile = path.join(home, "logs-follow-source-exit-args");
+    fs.mkdirSync(localBin, { recursive: true });
+    fs.mkdirSync(registryDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(registryDir, "sandboxes.json"),
+      JSON.stringify({
+        sandboxes: {
+          alpha: {
+            name: "alpha",
+            model: "test-model",
+            provider: "nvidia-prod",
+            gpuEnabled: false,
+            policies: [],
+          },
+        },
+        defaultSandbox: "alpha",
+      }),
+      { mode: 0o600 },
+    );
+    fs.writeFileSync(
+      path.join(localBin, "openshell"),
+      [
+        "#!/usr/bin/env bash",
+        `marker_file=${JSON.stringify(markerFile)}`,
+        'printf \'%s\\n\' "$*" >> "$marker_file"',
+        'if [ "$1" = "settings" ]; then',
+        "  exit 0",
+        "fi",
+        'if [ "$1" = "logs" ]; then',
+        "  exit 0",
+        "fi",
+        'if [ "$1" = "sandbox" ]; then',
+        "  trap 'exit 0' TERM INT",
+        "  while true; do sleep 1; done",
+        "fi",
+        "exit 0",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const child = spawn(process.execPath, [CLI, "alpha", "logs", "--follow"], {
+      cwd: path.join(import.meta.dirname, ".."),
+      env: { ...process.env, HOME: home, PATH: `${localBin}:${process.env.PATH || ""}` },
+      stdio: "ignore",
+    });
+    const exitPromise = new Promise<number | null>((resolve) => {
+      child.once("exit", (code) => resolve(code));
+    });
+    const readCalls = () =>
+      fs.existsSync(markerFile) ? fs.readFileSync(markerFile, "utf8").trim().split(/\n/) : [];
+
+    try {
+      let calls: string[] = [];
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        calls = readCalls();
+        if (
+          calls.includes("logs alpha -n 200 --source all --tail") &&
+          calls.includes("sandbox exec -n alpha -- tail -n 200 -f /tmp/gateway.log")
+        ) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      expect(child.exitCode).toBeNull();
+      expect(calls).toContain("logs alpha -n 200 --source all --tail");
+      expect(calls).toContain("sandbox exec -n alpha -- tail -n 200 -f /tmp/gateway.log");
+    } finally {
+      if (child.exitCode === null) {
+        child.kill("SIGTERM");
+      }
+      expect(await exitPromise).toBe(143);
+    }
   });
 
   it("uses named sandbox exec for bridge status helpers", () => {
@@ -929,18 +1041,8 @@ describe("CLI dispatch", () => {
     });
 
     expect(r.code).toBe(0);
-    expect(readRecordedArgs(markerFile)).toEqual([
-      "sandbox",
-      "exec",
-      "-n",
-      "alpha",
-      "--",
-      "tail",
-      "-n",
-      "200",
-      "/tmp/gateway.log",
-    ]);
-    expect(readRecordedArgs(markerFile)).not.toContain("-f");
+    expect(readRecordedArgs(markerFile)).toEqual(["logs", "alpha", "-n", "200", "--source", "all"]);
+    expect(readRecordedArgs(markerFile)).not.toContain("--tail");
   });
 
   it("connect does not pre-start a duplicate port forward", () => {
@@ -1790,6 +1892,9 @@ describe("CLI dispatch", () => {
         "#!/usr/bin/env bash",
         'if [ "$1" = "--version" ]; then',
         "  echo 'openshell 0.0.16'",
+        "  exit 0",
+        "fi",
+        'if [ "$1" = "settings" ]; then',
         "  exit 0",
         "fi",
         "kill -INT $$",

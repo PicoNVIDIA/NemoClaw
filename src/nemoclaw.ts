@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-const { execFileSync, spawnSync } = require("child_process");
+const { execFileSync, spawn, spawnSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -37,10 +37,7 @@ const {
   ensureOllamaAuthProxy,
   isNonInteractive,
 } = require("./lib/onboard");
-const {
-  parseGatewayTokenArgs,
-  runGatewayTokenCommand,
-} = require("./lib/gateway-token-command");
+const { parseGatewayTokenArgs, runGatewayTokenCommand } = require("./lib/gateway-token-command");
 const {
   getCredential,
   deleteCredential,
@@ -1790,8 +1787,14 @@ async function sandboxStatus(sandboxName: string) {
 }
 
 function sandboxLogs(sandboxName: string, follow: boolean) {
-  const args = buildSandboxLogsArgs(sandboxName, follow);
+  enableSandboxAuditLogs(sandboxName);
+  if (follow) {
+    streamSandboxFollowLogs(sandboxName);
+    return;
+  }
 
+  runOpenclawGatewayLogs(sandboxName, false);
+  const args = buildSandboxLogsArgs(sandboxName, false);
   const result = runOpenshell(args, {
     stdio: "inherit",
     ignoreError: true,
@@ -1802,12 +1805,115 @@ function sandboxLogs(sandboxName: string, follow: boolean) {
   exitWithSpawnResult(result);
 }
 
-function buildSandboxLogsArgs(sandboxName: string, follow: boolean): string[] {
+function runOpenclawGatewayLogs(sandboxName: string, follow: boolean): SpawnLikeResult {
+  const args = buildSandboxOpenclawGatewayLogsArgs(sandboxName, follow);
+  const result = runOpenshell(args, {
+    stdio: "inherit",
+    ignoreError: true,
+  });
+  if (result.status !== 0) {
+    console.error(
+      `  OpenClaw log source unavailable (exit ${result.status}): openshell ${args.join(" ")}`,
+    );
+  }
+  return result;
+}
+
+function streamSandboxFollowLogs(sandboxName: string): void {
+  const openclawArgs = buildSandboxOpenclawGatewayLogsArgs(sandboxName, true);
+  const openshellArgs = buildSandboxLogsArgs(sandboxName, true);
+  const openclaw = spawn(getOpenshellBinary(), openclawArgs, {
+    cwd: ROOT,
+    env: process.env,
+    stdio: "inherit",
+  });
+  const openshell = spawn(getOpenshellBinary(), openshellArgs, {
+    cwd: ROOT,
+    env: process.env,
+    stdio: "inherit",
+  });
+  const sources = [
+    { label: "OpenClaw log source", args: openclawArgs, child: openclaw, done: false },
+    { label: "OpenShell log source", args: openshellArgs, child: openshell, done: false },
+  ];
+  let exiting = false;
+  let completedSources = 0;
+  let finalStatus = 0;
+
+  const stopChildren = (signal: NodeJS.Signals) => {
+    for (const { child } of sources) {
+      if (!child.killed && child.exitCode === null && child.signalCode === null) {
+        child.kill(signal);
+      }
+    }
+  };
+  const exitFromSignal = (signal: NodeJS.Signals | null): number => {
+    if (!signal) return 1;
+    const signalNumber = os.constants.signals[signal];
+    return signalNumber ? 128 + signalNumber : 1;
+  };
+  const markSourceDone = (
+    source: (typeof sources)[number],
+    status: number,
+    detail: string | null = null,
+  ) => {
+    if (source.done || exiting) return;
+    source.done = true;
+    completedSources += 1;
+    if (status !== 0 && finalStatus === 0) {
+      finalStatus = status;
+    }
+    if (completedSources < sources.length) {
+      const suffix = detail || `exit ${status}`;
+      console.error(`  ${source.label} stopped (${suffix}); continuing with remaining log source.`);
+    }
+    if (completedSources === sources.length) {
+      process.exit(finalStatus);
+    }
+  };
+
+  process.once("SIGINT", () => {
+    exiting = true;
+    stopChildren("SIGINT");
+    process.exit(130);
+  });
+  process.once("SIGTERM", () => {
+    exiting = true;
+    stopChildren("SIGTERM");
+    process.exit(143);
+  });
+
+  for (const source of sources) {
+    source.child.on("error", (error: Error) => {
+      markSourceDone(source, 1, error.message);
+    });
+    source.child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+      markSourceDone(source, code ?? exitFromSignal(signal), signal ? `signal ${signal}` : null);
+    });
+  }
+}
+
+function enableSandboxAuditLogs(sandboxName: string) {
+  runOpenshell(["settings", "set", sandboxName, "--key", "ocsf_json_enabled", "--value", "true"], {
+    stdio: "ignore",
+    ignoreError: true,
+  });
+}
+
+function buildSandboxOpenclawGatewayLogsArgs(sandboxName: string, follow: boolean): string[] {
   const args = ["sandbox", "exec", "-n", sandboxName, "--", "tail", "-n", "200"];
   if (follow) {
     args.push("-f");
   }
   args.push("/tmp/gateway.log");
+  return args;
+}
+
+function buildSandboxLogsArgs(sandboxName: string, follow: boolean): string[] {
+  const args = ["logs", sandboxName, "-n", "200", "--source", "all"];
+  if (follow) {
+    args.push("--tail");
+  }
   return args;
 }
 
