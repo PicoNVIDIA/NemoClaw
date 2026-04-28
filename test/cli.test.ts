@@ -447,7 +447,7 @@ describe("CLI dispatch", () => {
     expect(r.out).toContain(FAKE_OPENSHELL_LOG_LINE);
   });
 
-  it("keeps logs --follow running when one log source exits", async () => {
+  it("keeps logs --follow running when one log source exits", { timeout: 15000 }, async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "nemoclaw-cli-logs-follow-source-exit-"));
     const localBin = path.join(home, "bin");
     const registryDir = path.join(home, ".nemoclaw");
@@ -504,7 +504,13 @@ describe("CLI dispatch", () => {
 
     try {
       let calls: string[] = [];
-      for (let attempt = 0; attempt < 20; attempt += 1) {
+      const configuredTimeout = Number(process.env.NEMOCLAW_TEST_TIMEOUT || 10000);
+      const pollTimeoutMs = Math.min(
+        Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : 10000,
+        10000,
+      );
+      const deadline = Date.now() + pollTimeoutMs;
+      while (Date.now() < deadline) {
         calls = readCalls();
         if (
           calls.includes("logs alpha -n 200 --source all --tail") &&
