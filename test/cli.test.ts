@@ -90,6 +90,9 @@ function readRecordedArgs(markerFile: string): string[] {
   return fs.readFileSync(markerFile, "utf8").trim().split(/\s+/);
 }
 
+const FAKE_OPENCLAW_LOG_LINE = "openclaw gateway log: policy checker ready";
+const FAKE_OPENSHELL_LOG_LINE = "openshell audit log: DENIED example.com:443";
+
 function createLogsTestSetup(prefix: string, openshellLines: string[] = []) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   const localBin = path.join(home, "bin");
@@ -119,7 +122,19 @@ function createLogsTestSetup(prefix: string, openshellLines: string[] = []) {
       "#!/usr/bin/env bash",
       `marker_file=${JSON.stringify(markerFile)}`,
       'printf \'%s\\n\' "$*" >> "$marker_file"',
-      ...(openshellLines.length ? openshellLines : ["exit 0"]),
+      ...openshellLines,
+      'if [ "$1" = "settings" ]; then',
+      "  exit 0",
+      "fi",
+      'if [ "$1" = "sandbox" ]; then',
+      `  echo ${JSON.stringify(FAKE_OPENCLAW_LOG_LINE)}`,
+      "  exit 0",
+      "fi",
+      'if [ "$1" = "logs" ]; then',
+      `  echo ${JSON.stringify(FAKE_OPENSHELL_LOG_LINE)}`,
+      "  exit 0",
+      "fi",
+      "exit 0",
     ].join("\n"),
     { mode: 0o755 },
   );
@@ -387,6 +402,8 @@ describe("CLI dispatch", () => {
       "sandbox exec -n alpha -- tail -n 200 /tmp/gateway.log",
       "logs alpha -n 200 --source all",
     ]);
+    expect(r.out).toContain(FAKE_OPENCLAW_LOG_LINE);
+    expect(r.out).toContain(FAKE_OPENSHELL_LOG_LINE);
   });
 
   it("enables OpenShell audit events before reading logs", () => {
@@ -396,6 +413,7 @@ describe("CLI dispatch", () => {
     const calls = setup.readCalls();
     expect(r.code).toBe(0);
     expect(calls[0]).toBe("settings set alpha --key ocsf_json_enabled --value true");
+    expect(r.out).toContain(FAKE_OPENSHELL_LOG_LINE);
   });
 
   it("warns when OpenShell audit events cannot be enabled", () => {
@@ -404,7 +422,6 @@ describe("CLI dispatch", () => {
       "  echo 'settings unavailable' >&2",
       "  exit 7",
       "fi",
-      "exit 0",
     ]);
 
     const r = setup.runLogs("alpha logs 2>&1");
@@ -413,56 +430,21 @@ describe("CLI dispatch", () => {
     expect(r.out).toContain("failed to enable OpenShell audit logs for sandbox 'alpha'");
     expect(r.out).toContain("openshell settings set alpha --key ocsf_json_enabled --value true");
     expect(r.out).toContain("settings unavailable");
+    expect(r.out).toContain(FAKE_OPENCLAW_LOG_LINE);
+    expect(r.out).toContain(FAKE_OPENSHELL_LOG_LINE);
   });
 
   it("maps --follow to OpenShell live log streaming", () => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "nemoclaw-cli-logs-follow-"));
-    const localBin = path.join(home, "bin");
-    const registryDir = path.join(home, ".nemoclaw");
-    const markerFile = path.join(home, "logs-follow-args");
-    fs.mkdirSync(localBin, { recursive: true });
-    fs.mkdirSync(registryDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(registryDir, "sandboxes.json"),
-      JSON.stringify({
-        sandboxes: {
-          alpha: {
-            name: "alpha",
-            model: "test-model",
-            provider: "nvidia-prod",
-            gpuEnabled: false,
-            policies: [],
-          },
-        },
-        defaultSandbox: "alpha",
-      }),
-      { mode: 0o600 },
-    );
-    fs.writeFileSync(
-      path.join(localBin, "openshell"),
-      [
-        "#!/usr/bin/env bash",
-        `marker_file=${JSON.stringify(markerFile)}`,
-        'if [ "$1" = "--version" ]; then',
-        "  echo 'openshell 0.0.16'",
-        "  exit 0",
-        "fi",
-        'printf \'%s\\n\' "$*" >> "$marker_file"',
-        "exit 0",
-      ].join("\n"),
-      { mode: 0o755 },
-    );
+    const setup = createLogsTestSetup("nemoclaw-cli-logs-follow-");
+    const r = setup.runLogs("alpha logs --follow");
 
-    const r = runWithEnv("alpha logs --follow", {
-      HOME: home,
-      PATH: `${localBin}:${process.env.PATH || ""}`,
-    });
-
-    const calls = fs.readFileSync(markerFile, "utf8").trim().split(/\n/);
+    const calls = setup.readCalls();
     expect(r.code).toBe(0);
     expect(calls).toContain("settings set alpha --key ocsf_json_enabled --value true");
     expect(calls).toContain("sandbox exec -n alpha -- tail -n 200 -f /tmp/gateway.log");
     expect(calls).toContain("logs alpha -n 200 --source all --tail");
+    expect(r.out).toContain(FAKE_OPENCLAW_LOG_LINE);
+    expect(r.out).toContain(FAKE_OPENSHELL_LOG_LINE);
   });
 
   it("keeps logs --follow running when one log source exits", async () => {
