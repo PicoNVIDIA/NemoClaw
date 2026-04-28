@@ -1894,10 +1894,22 @@ function streamSandboxFollowLogs(sandboxName: string): void {
 }
 
 function enableSandboxAuditLogs(sandboxName: string) {
-  runOpenshell(["settings", "set", sandboxName, "--key", "ocsf_json_enabled", "--value", "true"], {
-    stdio: "ignore",
+  const args = ["settings", "set", sandboxName, "--key", "ocsf_json_enabled", "--value", "true"];
+  const result = runOpenshell(args, {
+    stdio: ["ignore", "ignore", "pipe"],
     ignoreError: true,
   });
+  if (result.status !== 0) {
+    const stderr = String(result.stderr || "").trim();
+    console.error(
+      `  Warning: failed to enable OpenShell audit logs for sandbox '${sandboxName}' ` +
+        `(exit ${result.status ?? "unknown"}): openshell ${args.join(" ")}`,
+    );
+    if (stderr) {
+      console.error(`  ${stderr}`);
+    }
+    console.error("  Policy denial events may be missing from OpenShell logs.");
+  }
 }
 
 function buildSandboxOpenclawGatewayLogsArgs(sandboxName: string, follow: boolean): string[] {

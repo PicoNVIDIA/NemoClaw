@@ -90,6 +90,54 @@ function readRecordedArgs(markerFile: string): string[] {
   return fs.readFileSync(markerFile, "utf8").trim().split(/\s+/);
 }
 
+function createLogsTestSetup(prefix: string, openshellLines: string[] = []) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const localBin = path.join(home, "bin");
+  const registryDir = path.join(home, ".nemoclaw");
+  const markerFile = path.join(home, "logs-calls");
+  fs.mkdirSync(localBin, { recursive: true });
+  fs.mkdirSync(registryDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(registryDir, "sandboxes.json"),
+    JSON.stringify({
+      sandboxes: {
+        alpha: {
+          name: "alpha",
+          model: "test-model",
+          provider: "nvidia-prod",
+          gpuEnabled: false,
+          policies: [],
+        },
+      },
+      defaultSandbox: "alpha",
+    }),
+    { mode: 0o600 },
+  );
+  fs.writeFileSync(
+    path.join(localBin, "openshell"),
+    [
+      "#!/usr/bin/env bash",
+      `marker_file=${JSON.stringify(markerFile)}`,
+      'printf \'%s\\n\' "$*" >> "$marker_file"',
+      ...(openshellLines.length ? openshellLines : ["exit 0"]),
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  return {
+    home,
+    localBin,
+    markerFile,
+    readCalls: () =>
+      fs.existsSync(markerFile) ? fs.readFileSync(markerFile, "utf8").trim().split(/\n/) : [],
+    runLogs: (args = "alpha logs") =>
+      runWithEnv(args, {
+        HOME: home,
+        PATH: `${localBin}:${process.env.PATH || ""}`,
+      }),
+  };
+}
+
 describe("CLI dispatch", () => {
   it("help exits 0 and shows sections", () => {
     const r = run("help");
@@ -329,45 +377,10 @@ describe("CLI dispatch", () => {
   });
 
   it("routes logs to OpenClaw and OpenShell log sources", () => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "nemoclaw-cli-logs-follow-"));
-    const localBin = path.join(home, "bin");
-    const registryDir = path.join(home, ".nemoclaw");
-    const markerFile = path.join(home, "logs-args");
-    fs.mkdirSync(localBin, { recursive: true });
-    fs.mkdirSync(registryDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(registryDir, "sandboxes.json"),
-      JSON.stringify({
-        sandboxes: {
-          alpha: {
-            name: "alpha",
-            model: "test-model",
-            provider: "nvidia-prod",
-            gpuEnabled: false,
-            policies: [],
-          },
-        },
-        defaultSandbox: "alpha",
-      }),
-      { mode: 0o600 },
-    );
-    fs.writeFileSync(
-      path.join(localBin, "openshell"),
-      [
-        "#!/usr/bin/env bash",
-        `marker_file=${JSON.stringify(markerFile)}`,
-        'printf \'%s\\n\' "$*" >> "$marker_file"',
-        "exit 0",
-      ].join("\n"),
-      { mode: 0o755 },
-    );
+    const setup = createLogsTestSetup("nemoclaw-cli-logs-routing-");
+    const r = setup.runLogs();
 
-    const r = runWithEnv("alpha logs", {
-      HOME: home,
-      PATH: `${localBin}:${process.env.PATH || ""}`,
-    });
-
-    const calls = fs.readFileSync(markerFile, "utf8").trim().split(/\n/);
+    const calls = setup.readCalls();
     expect(r.code).toBe(0);
     expect(calls).toEqual([
       "settings set alpha --key ocsf_json_enabled --value true",
@@ -377,51 +390,29 @@ describe("CLI dispatch", () => {
   });
 
   it("enables OpenShell audit events before reading logs", () => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "nemoclaw-cli-logs-audit-"));
-    const localBin = path.join(home, "bin");
-    const registryDir = path.join(home, ".nemoclaw");
-    const markerFile = path.join(home, "logs-audit-calls");
-    fs.mkdirSync(localBin, { recursive: true });
-    fs.mkdirSync(registryDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(registryDir, "sandboxes.json"),
-      JSON.stringify({
-        sandboxes: {
-          alpha: {
-            name: "alpha",
-            model: "test-model",
-            provider: "nvidia-prod",
-            gpuEnabled: false,
-            policies: [],
-          },
-        },
-        defaultSandbox: "alpha",
-      }),
-      { mode: 0o600 },
-    );
-    fs.writeFileSync(
-      path.join(localBin, "openshell"),
-      [
-        "#!/usr/bin/env bash",
-        `marker_file=${JSON.stringify(markerFile)}`,
-        'printf \'%s\\n\' "$*" >> "$marker_file"',
-        "exit 0",
-      ].join("\n"),
-      { mode: 0o755 },
-    );
+    const setup = createLogsTestSetup("nemoclaw-cli-logs-audit-");
+    const r = setup.runLogs();
 
-    const r = runWithEnv("alpha logs", {
-      HOME: home,
-      PATH: `${localBin}:${process.env.PATH || ""}`,
-    });
-
-    const calls = fs.readFileSync(markerFile, "utf8").trim().split(/\n/);
+    const calls = setup.readCalls();
     expect(r.code).toBe(0);
-    expect(calls).toEqual([
-      "settings set alpha --key ocsf_json_enabled --value true",
-      "sandbox exec -n alpha -- tail -n 200 /tmp/gateway.log",
-      "logs alpha -n 200 --source all",
+    expect(calls[0]).toBe("settings set alpha --key ocsf_json_enabled --value true");
+  });
+
+  it("warns when OpenShell audit events cannot be enabled", () => {
+    const setup = createLogsTestSetup("nemoclaw-cli-logs-audit-failed-", [
+      'if [ "$1" = "settings" ]; then',
+      "  echo 'settings unavailable' >&2",
+      "  exit 7",
+      "fi",
+      "exit 0",
     ]);
+
+    const r = setup.runLogs("alpha logs 2>&1");
+
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("failed to enable OpenShell audit logs for sandbox 'alpha'");
+    expect(r.out).toContain("openshell settings set alpha --key ocsf_json_enabled --value true");
+    expect(r.out).toContain("settings unavailable");
   });
 
   it("maps --follow to OpenShell live log streaming", () => {
