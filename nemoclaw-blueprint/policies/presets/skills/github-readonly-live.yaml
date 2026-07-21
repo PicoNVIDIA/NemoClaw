@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Policy block for the `github-readonly-live` skill (nemoclaw-community):
+# authenticated, read-only GitHub REST access to the repository allowed by
+# `$GITHUB_READONLY_REPO`.
+#
+# Deliberately narrower than the `github` integration preset: GET-only,
+# api.github.com only (no github.com, no git binary), so the skill can read
+# issues, pull requests, commits, and contents but cannot clone or write.
+
+preset:
+  name: skill-github-readonly-live
+  description: "github-readonly-live skill: GET-only GitHub REST API access"
+
+network_policies:
+  skill_github_readonly_live:
+    name: skill_github_readonly_live
+    endpoints:
+      - host: api.github.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        rules:
+          # Repo-scoped reads: issues, comments, pulls, reviews, commits,
+          # branches, labels, milestones, README, contents.
+          - allow: { method: GET, path: "/repos/*" }
+          # Cheap auth/quota self-check used by the skill's helper.
+          - allow: { method: GET, path: "/rate_limit" }
+    binaries:
+      # Agent runtimes only — the skill forbids gh/git and raw curl use.
+      - { path: /opt/venv/bin/python3* }
+      - { path: /opt/hermes/.venv/bin/python }
+      - { path: /usr/local/bin/node }
+      - { path: /usr/bin/node }

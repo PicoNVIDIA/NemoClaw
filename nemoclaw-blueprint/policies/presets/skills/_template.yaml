@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Skill policy block template. Copy this file to <skill-name>.yaml (matching
+# the `name:` field in the skill's SKILL.md frontmatter), replace every
+# <placeholder>, and delete the guidance comments. Apply with:
+#
+#   nemoclaw <sandbox> policy add --from-file <this-file> --yes
+#
+# This template is not a usable preset as-is; applying it unmodified fails
+# semantic validation on the placeholder host.
+
+preset:
+  # `skill-` prefix keeps skill blocks distinguishable from integration
+  # presets in `policy list`, and is the name used by `policy remove`.
+  name: skill-<skill-name>
+  description: "<one line: which skill this serves and what it grants>"
+
+network_policies:
+  # `skill_` prefix prevents key collisions with integration presets — the
+  # merge logic refuses to overwrite a policy key it does not own.
+  skill_<skill_name_snake_case>:
+    name: skill_<skill_name_snake_case>
+    endpoints:
+      - host: <api.example.com>          # exact host, no wildcards
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        # Least privilege: enumerate the methods and paths the skill actually
+        # calls. Widen to `access: full` only when the skill genuinely needs
+        # arbitrary methods, and say why in a comment.
+        rules:
+          - allow: { method: GET, path: "/<path-the-skill-calls>" }
+        # If the skill sends an API key inside a JSON request body (rather
+        # than a header) and OpenShell should substitute the placeholder on
+        # egress, uncomment:
+        # request_body_credential_rewrite: true
+    binaries:
+      # Agent runtimes that may issue the requests: Deep Agents Code's
+      # managed Python (including versioned python3 names), Hermes' exact
+      # venv Python, and OpenClaw's Node paths. Trim to the runtimes the
+      # skill's agent actually uses.
+      - { path: /opt/venv/bin/python3* }
+      - { path: /opt/hermes/.venv/bin/python }
+      - { path: /usr/local/bin/node }
+      - { path: /usr/bin/node }

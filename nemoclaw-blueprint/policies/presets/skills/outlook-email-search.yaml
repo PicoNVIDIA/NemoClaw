@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Policy block for the `outlook-email-search` skill (nemoclaw-community):
+# read-only Microsoft Graph mail access for searching and reading messages.
+#
+# Narrower than the `outlook` integration preset: GET-only, mail routes only.
+# The delegated token placeholder in the Authorization header is substituted
+# by the OpenShell L7 proxy on egress; no request-body rewrite is needed.
+
+preset:
+  name: skill-outlook-email-search
+  description: "outlook-email-search skill: GET-only Microsoft Graph mail read"
+
+network_policies:
+  skill_outlook_email_search:
+    name: skill_outlook_email_search
+    endpoints:
+      - host: graph.microsoft.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        rules:
+          # Owner-mailbox search and thread reads via /users/{email}/...
+          # (delegated token with Mail.ReadWrite.Shared); GET keeps the
+          # grant read-only regardless of the token's write scope.
+          - allow: { method: GET, path: "/v1.0/users/*" }
+          # Fallback when the skill targets the agent's own mailbox.
+          - allow: { method: GET, path: "/v1.0/me/*" }
+    binaries:
+      # The skill's helpers run under the agent's Python runtime.
+      - { path: /opt/venv/bin/python3* }
+      - { path: /opt/hermes/.venv/bin/python }
+      - { path: /usr/bin/python3* }
