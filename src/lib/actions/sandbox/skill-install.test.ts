@@ -9,6 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const captureSandboxSshConfig = vi.hoisted(() => vi.fn());
 const getSessionAgent = vi.hoisted(() => vi.fn());
 const ensureLiveSandboxOrExit = vi.hoisted(() => vi.fn());
+const addSandboxPolicy = vi.hoisted(() => vi.fn());
+const findCuratedSkillPolicyBlock = vi.hoisted(() => vi.fn());
 const skillInstall = vi.hoisted(() => ({
   validateSkillName: vi.fn(),
   resolveSkillPaths: vi.fn(),
@@ -34,6 +36,14 @@ vi.mock("../../skill-install", () => skillInstall);
 
 vi.mock("./gateway-state", () => ({
   ensureLiveSandboxOrExit,
+}));
+
+vi.mock("../../policy", () => ({
+  findCuratedSkillPolicyBlock,
+}));
+
+vi.mock("./policy-channel", () => ({
+  addSandboxPolicy,
 }));
 
 import { installSandboxSkill, removeSandboxSkill } from "./skill-install";
@@ -101,6 +111,8 @@ describe("sandbox skill action orchestration", () => {
     });
     skillInstall.postInstall.mockReturnValue({ success: true, messages: [] });
     skillInstall.verifyInstall.mockReturnValue(true);
+    findCuratedSkillPolicyBlock.mockReturnValue(null);
+    addSandboxPolicy.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -274,5 +286,101 @@ describe("sandbox skill action orchestration", () => {
     expect(output).toContain("nemoclaw alpha shields down");
     expect(skillInstall.postInstall).not.toHaveBeenCalled();
     expect(exit).toHaveBeenCalledWith(1);
+  });
+
+  it("applies a bundled policy.yaml through the custom preset path with --with-policy", async () => {
+    const skillDir = makeSkillDir();
+    const blockPath = path.join(skillDir, "policy.yaml");
+    fs.writeFileSync(blockPath, "preset:\n  name: skill-demo-skill\n");
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    try {
+      await installSandboxSkill("alpha", {
+        command: "install",
+        path: skillDir,
+        withPolicy: true,
+        yes: true,
+      });
+    } finally {
+      fs.rmSync(skillDir, { recursive: true, force: true });
+    }
+
+    expect(addSandboxPolicy).toHaveBeenCalledWith("alpha", { fromFile: blockPath, yes: true });
+    expect(findCuratedSkillPolicyBlock).not.toHaveBeenCalled();
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("falls back to the curated skill policy block when the skill ships none", async () => {
+    const skillDir = makeSkillDir();
+    findCuratedSkillPolicyBlock.mockReturnValue("/repo/presets/skills/demo-skill.yaml");
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    try {
+      await installSandboxSkill("alpha", { command: "install", path: skillDir, withPolicy: true });
+    } finally {
+      fs.rmSync(skillDir, { recursive: true, force: true });
+    }
+
+    expect(findCuratedSkillPolicyBlock).toHaveBeenCalledWith("demo-skill");
+    expect(addSandboxPolicy).toHaveBeenCalledWith("alpha", {
+      fromFile: "/repo/presets/skills/demo-skill.yaml",
+      yes: false,
+    });
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("fails --with-policy when no policy block exists for the skill", async () => {
+    const skillDir = makeSkillDir();
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    try {
+      await installSandboxSkill("alpha", { command: "install", path: skillDir, withPolicy: true });
+    } finally {
+      fs.rmSync(skillDir, { recursive: true, force: true });
+    }
+
+    const output = error.mock.calls.map((args) => args.join(" ")).join("\n");
+    expect(output).toContain("--with-policy: no policy block found for 'demo-skill'.");
+    expect(addSandboxPolicy).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("hints how to apply an available policy block when --with-policy is not set", async () => {
+    const skillDir = makeSkillDir();
+    const blockPath = path.join(skillDir, "policy.yaml");
+    fs.writeFileSync(blockPath, "preset:\n  name: skill-demo-skill\n");
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    try {
+      await installSandboxSkill("alpha", { command: "install", path: skillDir });
+    } finally {
+      fs.rmSync(skillDir, { recursive: true, force: true });
+    }
+
+    const output = log.mock.calls.map((args) => args.join(" ")).join("\n");
+    expect(output).toContain(`policy add --from-file ${blockPath}`);
+    expect(addSandboxPolicy).not.toHaveBeenCalled();
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("accepts --with-policy and -y as legacy extra args", async () => {
+    const skillDir = makeSkillDir();
+    const blockPath = path.join(skillDir, "policy.yaml");
+    fs.writeFileSync(blockPath, "preset:\n  name: skill-demo-skill\n");
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    try {
+      await installSandboxSkill("alpha", {
+        command: "install",
+        path: skillDir,
+        extraArgs: ["--with-policy", "-y"],
+      });
+    } finally {
+      fs.rmSync(skillDir, { recursive: true, force: true });
+    }
+
+    expect(addSandboxPolicy).toHaveBeenCalledWith("alpha", { fromFile: blockPath, yes: true });
+    expect(process.exitCode).toBeUndefined();
   });
 });

@@ -8,13 +8,15 @@ import { OPENSHELL_PROBE_TIMEOUT_MS } from "../../adapters/openshell/timeouts";
 import * as agentRuntime from "../../agent/runtime";
 import { CLI_NAME } from "../../cli/branding";
 import { D, G, R, YW } from "../../cli/terminal-style";
+import * as policies from "../../policy";
 import { createTempSshConfig } from "../../sandbox/temp-ssh-config";
 import * as skillInstall from "../../skill-install";
 import { ensureLiveSandboxOrExit } from "./gateway-state";
+import { addSandboxPolicy } from "./policy-channel";
 
 export function printSkillInstallUsage(): void {
   console.log("");
-  console.log(`  Usage: ${CLI_NAME} <sandbox> skill install <path>`);
+  console.log(`  Usage: ${CLI_NAME} <sandbox> skill install <path> [--with-policy [--yes|-y]]`);
   console.log(`         ${CLI_NAME} <sandbox> skill remove <name>`);
   console.log("");
   console.log("  Deploy or remove a skill in a running sandbox.");
@@ -26,6 +28,13 @@ export function printSkillInstallUsage(): void {
   console.log(
     "    or a direct path to a SKILL.md file. All non-dot files in the directory are uploaded.",
   );
+  console.log(
+    "    --with-policy also applies the skill's policy block (a policy.yaml next to SKILL.md,",
+  );
+  console.log(
+    "    or a curated block in policies/presets/skills/) so the sandbox allows the skill's",
+  );
+  console.log("    endpoints. --yes skips the policy confirmation prompt.");
   console.log("");
   console.log("  remove <name>   Remove an installed skill from the sandbox by name.");
   console.log("    <name> is the skill name from SKILL.md frontmatter (e.g. my-skill).");
@@ -64,6 +73,8 @@ export type SkillInstallRequest = {
   command?: string;
   path?: string;
   extraArgs?: string[];
+  withPolicy?: boolean;
+  yes?: boolean;
 };
 
 export type SkillRemoveRequest = {
@@ -204,14 +215,26 @@ export async function installSandboxSkill(
   }
 
   const skillPath = request.path;
-  const extraArgs = request.extraArgs ?? [];
+  let withPolicy = request.withPolicy === true;
+  let skipPolicyConfirm = request.yes === true;
+  const extraArgs = (request.extraArgs ?? []).filter((arg) => {
+    if (arg === "--with-policy") {
+      withPolicy = true;
+      return false;
+    }
+    if (arg === "--yes" || arg === "-y") {
+      skipPolicyConfirm = true;
+      return false;
+    }
+    return true;
+  });
   if (skillPath === "--help" || skillPath === "-h" || skillPath === "help") {
     printSkillInstallUsage();
     return;
   }
   if (extraArgs.length > 0) {
     console.error(`  Unknown argument(s) for skill install: ${extraArgs.join(", ")}`);
-    console.error(`  Usage: ${CLI_NAME} <sandbox> skill install <path>`);
+    console.error(`  Usage: ${CLI_NAME} <sandbox> skill install <path> [--with-policy [--yes|-y]]`);
     process.exit(1);
   }
   if (!skillPath) {
@@ -348,5 +371,37 @@ export async function installSandboxSkill(
     }
   } finally {
     tmpSshConfig.cleanup();
+  }
+
+  // 9. Skill policy block. The sandbox denies egress by default, so a skill
+  //    whose endpoints are not in the active policy fails at runtime. A
+  //    skill-bundled policy.yaml (next to SKILL.md) or a curated block under
+  //    policies/presets/skills/<name>.yaml declares those endpoints; apply it
+  //    through the same validated custom-preset path as
+  //    `policy add --from-file`. Without --with-policy the grant stays an
+  //    explicit operator decision, so only print how to apply it.
+  const bundledBlockPath = path.join(skillDir, "policy.yaml");
+  const policyBlockPath = fs.existsSync(bundledBlockPath)
+    ? bundledBlockPath
+    : policies.findCuratedSkillPolicyBlock(frontmatter.name);
+  if (withPolicy) {
+    if (!policyBlockPath) {
+      console.error(`  ${YW}--with-policy: no policy block found for '${frontmatter.name}'.${R}`);
+      console.error(
+        "  Add a policy.yaml next to SKILL.md (draft one with scripts/skill-policy-block.mts)",
+      );
+      console.error("  or contribute a curated block under policies/presets/skills/.");
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`  Applying skill policy block: ${policyBlockPath}`);
+    await addSandboxPolicy(sandboxName, {
+      fromFile: policyBlockPath,
+      yes: skipPolicyConfirm,
+    });
+  } else if (policyBlockPath) {
+    console.log(`  ${D}This skill declares a network policy block. Apply it with:${R}`);
+    console.log(`  ${D}  ${CLI_NAME} ${sandboxName} policy add --from-file ${policyBlockPath}${R}`);
+    console.log(`  ${D}or re-run install with --with-policy.${R}`);
   }
 }

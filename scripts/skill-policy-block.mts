@@ -18,12 +18,25 @@
  * every endpoint starts GET-only and hosts are inferred, not proven.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
 
 const MAX_SCAN_BYTES = 256 * 1024;
-const SCAN_EXTENSIONS = new Set([".md", ".py", ".sh", ".ts", ".mts", ".js", ".mjs", ".json", ".yaml", ".yml", ".txt", ".toml"]);
+const SCAN_EXTENSIONS = new Set([
+  ".md",
+  ".py",
+  ".sh",
+  ".ts",
+  ".mts",
+  ".js",
+  ".mjs",
+  ".json",
+  ".yaml",
+  ".yml",
+  ".txt",
+  ".toml",
+]);
 const IGNORED_HOSTS = [
   /^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])$/,
   /(^|\.)example\.(com|org|net)$/,
@@ -40,7 +53,11 @@ const IGNORED_HOSTS = [
 interface SkillFrontmatter {
   name?: string;
   description?: string;
-  metadata?: { openclaw?: SkillRequiresBlock; clawdbot?: SkillRequiresBlock; clawdis?: SkillRequiresBlock };
+  metadata?: {
+    openclaw?: SkillRequiresBlock;
+    clawdbot?: SkillRequiresBlock;
+    clawdis?: SkillRequiresBlock;
+  };
 }
 
 interface SkillRequiresBlock {
@@ -120,7 +137,10 @@ export function toRulePaths(paths: Set<string>): string[] {
 }
 
 function snakeCase(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
 }
 
 export function renderPolicyBlock(
@@ -202,7 +222,12 @@ function main(): void {
     );
   }
 
-  const block = renderPolicyBlock(frontmatter.name, frontmatter.description ?? "", hostPaths, requiresEnv);
+  const block = renderPolicyBlock(
+    frontmatter.name,
+    frontmatter.description ?? "",
+    hostPaths,
+    requiresEnv,
+  );
 
   if (write) {
     const outPath = path.join(skillDir, "policy.yaml");

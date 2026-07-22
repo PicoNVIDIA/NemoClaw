@@ -130,6 +130,19 @@ function loadCentralPreset(name: string, options: { reportMissing?: boolean } = 
   return fs.readFileSync(file, "utf-8");
 }
 
+/**
+ * Path to the curated skill policy block for a skill name, or `null` if the
+ * library ships none. Blocks live in `PRESETS_DIR/skills/<skill-name>.yaml`,
+ * outside the built-in preset listing, and are applied through the custom
+ * preset (`--from-file`) path. Guards against path traversal.
+ */
+export function findCuratedSkillPolicyBlock(skillName: string): string | null {
+  const skillsDir = path.join(PRESETS_DIR, "skills");
+  const file = path.resolve(skillsDir, `${skillName}.yaml`);
+  if (!file.startsWith(skillsDir + path.sep)) return null;
+  return fs.existsSync(file) ? file : null;
+}
+
 function loadPresetForAgent(name: string, options: PresetLoadOptions = {}): string | null {
   const channelPreset = loadMessagingChannelPolicyPreset(name, { agent: options.agent });
   if (channelPreset) return channelPreset;
